@@ -1,6 +1,7 @@
 import asyncio
 import re
 from dataclasses import dataclass
+from itertools import cycle, groupby
 from typing import Literal
 
 from beartype.typing import Sequence
@@ -136,12 +137,15 @@ class IntruderScorer(Classifier):
         """
         Get the quantiled examples.
         """
-        quantiles = {}
-        for example in examples:
-            if example.quantile not in quantiles:
-                quantiles[example.quantile] = []
-            quantiles[example.quantile].append(example)
-        return quantiles
+        examples_sorted_by_quantile = sorted(examples, key=lambda x: x.quantile)
+        examples_grouped_by_quantile = groupby(
+            examples_sorted_by_quantile, key=lambda x: x.quantile
+        )
+
+        return {
+            quantile: list(examples)
+            for quantile, examples in examples_grouped_by_quantile
+        }
 
     def _prepare_and_batch(self, record: LatentRecord) -> list[IntruderSentence]:
         """
@@ -153,38 +157,36 @@ class IntruderScorer(Classifier):
         quantiled_intruder_sentences = self._get_quantiled_examples(record.test)
 
         intruder_sentences = record.not_active
-        for i, intruder in enumerate(intruder_sentences):
-            # select each quantile equally
-            quantile_index = i % len(quantiled_intruder_sentences.keys())
 
-            active_examples = quantiled_intruder_sentences[quantile_index]
+        # select each quantile equally
+        quantile_iterator = cycle(quantiled_intruder_sentences.keys())
+        for quantile_index, intruder in zip(quantile_iterator, intruder_sentences):
+            all_active_examples = quantiled_intruder_sentences[quantile_index]
             # if there are more examples than the number of examples to show,
             # sample which examples to show
-            examples_to_show = min(self.n_examples_shown - 1, len(active_examples))
-            example_indices = self.rng.sample(
-                range(len(active_examples)), examples_to_show
+            num_active_examples = min(
+                self.n_examples_shown - 1, len(all_active_examples)
             )
-            active_examples = [active_examples[i] for i in example_indices]
+            active_examples = self.rng.sample(all_active_examples, num_active_examples)
 
-            # convert the examples to strings
-
-            # highlights the active tokens
+            # highlights the active tokens with <<>> markers
             majority_examples = []
-            active_tokens = 0
+            num_active_tokens = 0
             for example in active_examples:
-                text, _ = _prepare_text(
+                text, _str_tokens = _prepare_text(
                     example, n_incorrect=0, threshold=0.3, highlighted=True
                 )
                 majority_examples.append(text)
-                active_tokens += (example.activations > 0).sum().item()
-            active_tokens = int(active_tokens / len(active_examples))
+                num_active_tokens += (example.activations > 0).sum().item()
+
+            avg_active_tokens_per_example = num_active_tokens // len(active_examples)
             if self.type == "default":
                 # if example is contrastive, use the active tokens
                 # otherwise use the non-activating tokens
                 if intruder.activations.max() > 0:
                     n_incorrect = 0
                 else:
-                    n_incorrect = active_tokens
+                    n_incorrect = avg_active_tokens_per_example
                 intruder_sentence, _ = _prepare_text(
                     intruder,
                     n_incorrect=n_incorrect,
@@ -226,7 +228,7 @@ class IntruderScorer(Classifier):
                 intruder = non_activating_intruder
 
             # select a random index to insert the intruder sentence
-            intruder_index = self.rng.randint(0, examples_to_show)
+            intruder_index = self.rng.randint(0, num_active_examples)
             majority_examples.insert(intruder_index, intruder_sentence)
 
             activations = [example.activations.tolist() for example in active_examples]
@@ -319,7 +321,6 @@ class IntruderScorer(Classifier):
             # default result is a error
             return IntruderResult()
         else:
-
             try:
                 interpretation, prediction = self._parse(response.text)
             except Exception as e:
