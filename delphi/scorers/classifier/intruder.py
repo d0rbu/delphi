@@ -171,13 +171,13 @@ class IntruderScorer(Classifier):
             active_examples = self.rng.sample(all_active_examples, num_active_examples)
 
             # highlights the active tokens with <<>> markers
-            majority_examples = []
+            examples = []
             num_active_tokens = 0
             for example in active_examples:
                 text, _str_tokens = _prepare_text(
                     example, n_incorrect=0, threshold=0.3, highlighted=True
                 )
-                majority_examples.append(text)
+                examples.append(text)
                 num_active_tokens += (example.activations > 0).sum().item()
 
             avg_active_tokens_per_example = num_active_tokens // len(active_examples)
@@ -223,20 +223,18 @@ class IntruderScorer(Classifier):
 
             # select a random index to insert the intruder sentence
             intruder_index = self.rng.randint(0, num_active_examples)
-            majority_examples.insert(intruder_index, intruder_sentence)
+            examples.insert(intruder_index, intruder_sentence)
 
-            activations = [example.activations.tolist() for example in active_examples]
-            tokens = [example.str_tokens for example in active_examples]
-            activations.insert(intruder_index, intruder.activations.tolist())
-            tokens.insert(intruder_index, intruder.str_tokens)
+            example_activations = [example.activations.tolist() for example in examples]
+            example_tokens = [example.str_tokens for example in examples]
 
             batches.append(
                 IntruderSentence(
-                    examples=majority_examples,
+                    examples=examples,
                     intruder_index=intruder_index,
                     chosen_quantile=active_quantile,
-                    activations=activations,
-                    tokens=tokens,
+                    activations=example_activations,
+                    tokens=example_tokens,
                     intruder_distance=intruder.distance,
                 )
             )
