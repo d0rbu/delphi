@@ -158,10 +158,11 @@ class IntruderScorer(Classifier):
 
         intruder_sentences = record.not_active
 
-        # select each quantile equally
-        quantile_iterator = cycle(quantiled_intruder_sentences.keys())
-        for quantile_index, intruder in zip(quantile_iterator, intruder_sentences):
-            all_active_examples = quantiled_intruder_sentences[quantile_index]
+        # select each quantile equally by repeatedly cycling through them
+        quantile_iterator = cycle(quantiled_intruder_sentences.items())
+        for (active_quantile, all_active_examples), intruder in zip(
+            quantile_iterator, intruder_sentences
+        ):
             # if there are more examples than the number of examples to show,
             # sample which examples to show
             num_active_examples = min(
@@ -196,22 +197,15 @@ class IntruderScorer(Classifier):
             elif self.type == "internal":
                 # randomly select a quantile to be the intruder, make sure it's not
                 # the same as the source quantile
-                intruder_quantile_index = self.rng.randint(
-                    0, len(quantiled_intruder_sentences.keys()) - 1
-                )
-                while intruder_quantile_index == quantile_index:
-                    intruder_quantile_index = self.rng.randint(
-                        0, len(quantiled_intruder_sentences.keys()) - 1
-                    )
-                posible_intruder_sentences = quantiled_intruder_sentences[
-                    intruder_quantile_index
-                ]
-                intruder_index_selected = self.rng.randint(
-                    0, len(posible_intruder_sentences) - 1
-                )
-                intruder = posible_intruder_sentences[intruder_index_selected]
+                all_quantile_examples = list(quantiled_intruder_sentences.values())
+                all_quantile_examples.remove(all_active_examples)
+                possible_intruder_sentences = self.rng.choice(all_quantile_examples)
+
+                intruder = self.rng.choice(possible_intruder_sentences)
                 # here the examples are activating, so we have to convert them
                 # to non-activating examples
+                assert intruder.str_tokens is not None, "intruder has no str_tokens"
+
                 non_activating_intruder = NonActivatingExample(
                     tokens=intruder.tokens,
                     activations=intruder.activations,
@@ -240,7 +234,7 @@ class IntruderScorer(Classifier):
                 IntruderSentence(
                     examples=majority_examples,
                     intruder_index=intruder_index,
-                    chosen_quantile=quantile_index,
+                    chosen_quantile=active_quantile,
                     activations=activations,
                     tokens=tokens,
                     intruder_distance=intruder.distance,
