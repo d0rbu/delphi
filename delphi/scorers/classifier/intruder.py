@@ -269,7 +269,7 @@ class IntruderScorer(Classifier):
         """
 
         examples = "\n".join(
-            f"Example {i}: {example}" for i, example in enumerate(sample.examples)
+            f"Example {i}:{example}" for i, example in enumerate(sample.examples)
         )
 
         return self.prompt(examples=examples)
