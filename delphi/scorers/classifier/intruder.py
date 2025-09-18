@@ -305,20 +305,11 @@ class IntruderScorer(Classifier):
         prompt = self._build_prompt(sample)
         try:
             response = await self.client.generate(prompt, **self.generation_kwargs)
+            interpretation, prediction = self._parse(response.text)
         except Exception as e:
-            logger.error(f"Error generating text: {e}")
-            response = None
-
-        if response is None:
+            logger.error(str(e))
             # default result is a error
             return IntruderResult()
-        else:
-            try:
-                interpretation, prediction = self._parse(response.text)
-            except Exception as e:
-                logger.error(f"Parsing selections failed: {e}")
-                # default result is a error
-                return IntruderResult()
 
         # check that the only prediction is the intruder
         correct = prediction == sample.intruder_index
