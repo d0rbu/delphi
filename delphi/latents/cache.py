@@ -2,6 +2,7 @@ import json
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -138,7 +139,9 @@ class InMemoryCache:
                 self.tokens_batches[module_path], dim=0
             )
 
-    def get_nonzeros(self, latents: latent_tensor_type, module_path: str) -> tuple[
+    def get_nonzeros(
+        self, latents: latent_tensor_type, module_path: str
+    ) -> tuple[
         location_tensor_type,
         activation_tensor_type,
     ]:
@@ -204,7 +207,7 @@ class LatentCache:
         self.hookpoint_to_sparse_encode = hookpoint_to_sparse_encode
         self.transcode = transcode
         self.batch_size = batch_size
-        self.width = None
+        self.widths = {}
         self.cache = InMemoryCache(filters, batch_size=batch_size)
         self.hookpoint_firing_counts: dict[str, Tensor] = {}
 
@@ -283,17 +286,16 @@ class LatentCache:
                             )
                             self.cache.add(sae_latents, batch, batch_number, hookpoint)
                             firing_counts = (sae_latents > 0).sum((0, 1))
-                            if self.width is None:
-                                self.width = sae_latents.shape[2]
+                            self.widths[hookpoint] = sae_latents.shape[2]
 
                             if hookpoint not in self.hookpoint_firing_counts:
                                 self.hookpoint_firing_counts[hookpoint] = (
                                     firing_counts.cpu()
                                 )
                             else:
-                                self.hookpoint_firing_counts[
-                                    hookpoint
-                                ] += firing_counts.cpu()
+                                self.hookpoint_firing_counts[hookpoint] += (
+                                    firing_counts.cpu()
+                                )
 
                 # Update the progress bar
                 pbar.update(1)
@@ -324,7 +326,9 @@ class LatentCache:
 
             save_file(data, output_file)
 
-    def _generate_split_indices(self, n_splits: int) -> list[tuple[Tensor, Tensor]]:
+    def _generate_split_indices(
+        self, n_splits: int
+    ) -> dict[str, list[tuple[Tensor, Tensor]]]:
         """
         Generate indices for splitting the latent space.
 
@@ -332,13 +336,27 @@ class LatentCache:
             n_splits: Number of splits to generate.
 
         Returns:
-            list[tuple[int, int]]: list of start and end indices for each split.
+            dict[str, list[tuple[Tensor, Tensor]]]: dict of hookpoints and their
+                split indices.
         """
-        assert self.width is not None, "Width must be set before generating splits"
-        boundaries = torch.linspace(0, self.width, steps=n_splits + 1).long()
+        hookpoints = set(self.hookpoint_to_sparse_encode)
+        widths = set(self.widths)
 
-        # Adjust end by one
-        return list(zip(boundaries[:-1], boundaries[1:] - 1))
+        hookpoints_without_widths = hookpoints - widths
+        assert len(hookpoints_without_widths) == 0, (
+            f"Not all hookpoints have a width: {hookpoints_without_widths}"
+        )
+
+        boundaries = {
+            hookpoint: torch.linspace(
+                0, self.widths[hookpoint], steps=n_splits + 1
+            ).long()
+            for hookpoint in self.hookpoint_to_sparse_encode
+        }
+
+        return {
+            hookpoint: list(pairwise(boundaries[hookpoint])) for hookpoint in hookpoints
+        }
 
     def save_splits(self, n_splits: int, save_dir: Path, save_tokens: bool = True):
         """
@@ -350,11 +368,11 @@ class LatentCache:
             save_tokens: Whether to save the dataset tokens used to generate the cache.
             Defaults to True.
         """
-        split_indices = self._generate_split_indices(n_splits)
-        for module_path in self.cache.latent_locations.keys():
-            latent_locations = self.cache.latent_locations[module_path]
-            latent_activations = self.cache.latent_activations[module_path]
-            tokens = self.cache.tokens[module_path].numpy()
+        all_split_indices = self._generate_split_indices(n_splits)
+        for hookpoint, latent_locations in self.cache.latent_locations.items():
+            latent_activations = self.cache.latent_activations[hookpoint]
+            tokens = self.cache.tokens[hookpoint].numpy()
+            split_indices = all_split_indices[hookpoint]
 
             latent_indices = latent_locations[:, 2]
 
@@ -380,7 +398,7 @@ class LatentCache:
                         "memory usage of the cache."
                     )
 
-                module_dir = save_dir / module_path
+                module_dir = save_dir / hookpoint
                 module_dir.mkdir(parents=True, exist_ok=True)
 
                 output_file = module_dir / f"{start}_{end}.safetensors"
@@ -399,16 +417,22 @@ class LatentCache:
         Print statistics (number of dead features, number of single token features)
         to the console.
         """
-        assert self.width is not None, "Width must be set before generating statistics"
+        module_paths = set(self.cache.latent_locations.keys())
+        widths = set(self.widths)
+        module_paths_without_widths = module_paths - widths
+        assert len(module_paths_without_widths) == 0, (
+            f"Not all module paths have a width: {module_paths_without_widths}"
+        )
+
         logger.info("Feature statistics:")
         # Token frequency
-        for module_path in self.cache.latent_locations.keys():
+        for module_path in module_paths:
             logger.info(f"# Module: {module_path}")
             generate_statistics_cache(
                 self.cache.tokens[module_path],
                 self.cache.latent_locations[module_path],
                 self.cache.latent_activations[module_path],
-                self.width,
+                self.widths[module_path],
                 verbose=True,
             )
 
