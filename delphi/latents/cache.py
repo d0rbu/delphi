@@ -418,7 +418,7 @@ class LatentCache:
         to the console.
         """
         module_paths = set(self.cache.latent_locations.keys())
-        widths = set(self.widths)
+        widths = set(self.widths.keys())
         module_paths_without_widths = module_paths - widths
         assert len(module_paths_without_widths) == 0, (
             f"Not all module paths have a width: {module_paths_without_widths}"
