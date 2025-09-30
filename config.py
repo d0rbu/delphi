@@ -208,6 +208,21 @@ class RunConfig(Serializable):
     scoring speed but can leak information to the fuzzing and detection scorer,
     as well as increasing the scorer LLM task difficulty."""
 
+    temperature: float = field(
+        default=0.0,
+    )
+    """Temperature for LLM generation in scorers."""
+
+    cot: bool = field(
+        default=False,
+    )
+    """Whether to use chain-of-thought reasoning in scorers."""
+
+    intruder_type: Literal["default", "internal"] = field(
+        default="default",
+    )
+    """Type of intruder scorer to use."""
+
     overwrite: list[Literal["cache", "neighbours", "scores"]] = list_field(
         choices=["cache", "neighbours", "scores"],
         default=[],

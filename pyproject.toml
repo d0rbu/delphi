@@ -49,7 +49,7 @@ include = ["delphi*"]
 reportPrivateImportUsage = false
 
 [tool.setuptools.packages.find]
-include = ["delphi*"]
+where = ["."]
 
 [tool.ruff]
 # TODO: Clean up or remove experiments folder.
