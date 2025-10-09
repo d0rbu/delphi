@@ -167,7 +167,7 @@ class RunConfig(Serializable):
     max_latents: int | None = None
     """Maximum number of features to explain for each sparse model."""
 
-    filter_bos: bool = False
+    filter_bos: bool = True
     """Whether to filter out BOS tokens from the cache."""
 
     log_probs: bool = False
@@ -190,6 +190,11 @@ class RunConfig(Serializable):
         default=torch.cuda.device_count(),
     )
     """Number of GPUs to use for explanation and scoring."""
+
+    max_memory: float = field(
+        default=0.9,
+    )
+    """Fraction of GPU memory to allocate to running explainer model."""
 
     seed: int = field(
         default=22,

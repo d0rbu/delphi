@@ -147,7 +147,10 @@ def _prepare_text(
             remaining_tokens_below_threshold.remove(token_pos)
 
             random_indices.extend(
-                random.sample(below_threshold.tolist(), n_incorrect - 1)
+                random.sample(
+                    remaining_tokens_below_threshold,
+                    num_remaining_tokens_to_highlight,
+                )
             )
     else:
         random_indices = random.sample(
