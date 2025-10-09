@@ -162,7 +162,7 @@ class Pipeline:
             result = item
             for pipe in self.pipes:
                 if result is None:
-                    break
+                    return None
 
                 result = await pipe(result)
 
