@@ -1,6 +1,6 @@
 import json
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -214,7 +214,7 @@ class LatentCache:
 
     def load_token_batches(
         self, n_tokens: int, tokens: token_tensor_type
-    ) -> list[token_tensor_type]:
+    ) -> Sequence[token_tensor_type]:
         """
         Load and prepare token batches for processing.
 
@@ -223,19 +223,12 @@ class LatentCache:
             tokens: Input tokens.
 
         Returns:
-            list[Tensor]: list of token batches.
+            Sequence[Tensor]: sequence of token batches.
         """
         max_batches = n_tokens // tokens.shape[1]
         tokens = tokens[:max_batches]
 
-        n_mini_batches = len(tokens) // self.batch_size
-
-        token_batches = [
-            tokens[self.batch_size * i : self.batch_size * (i + 1), :]
-            for i in range(n_mini_batches)
-        ]
-
-        return token_batches
+        return torch.split(tokens, self.batch_size)
 
     def filter_submodules(self, filters: dict[str, Float[Tensor, "indices"]]):
         """

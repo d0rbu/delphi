@@ -28,7 +28,9 @@ dependencies = [
     "anyio>=4.8.0",
     "faiss-cpu",
     "asyncer>=0.0.8",
-    "beartype"
+    "beartype",
+    "pre-commit>=4.3.0",
+    "pytest>=8.4.1",
 ]
 
 [project.optional-dependencies]
