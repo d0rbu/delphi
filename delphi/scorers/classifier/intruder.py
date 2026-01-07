@@ -51,6 +51,7 @@ class IntruderScorer(Classifier):
         client: Client,
         verbose: bool = False,
         n_examples_shown: int = 1,
+        log_probs: bool = False,
         temperature: float = 0.0,
         cot: bool = False,
         type: Literal["default", "internal"] = "default",
@@ -67,6 +68,7 @@ class IntruderScorer(Classifier):
             n_examples_shown: The number of examples to show in the prompt,
                         a larger number can both leak information and make
                         it harder for models to generate anwers in the correct format
+            log_probs: Whether to use log probabilities to allow for AUC calculation
             temperature: The temperature to use for generation
             type: The type of intruder to use, either "word" or "sentence"
             generation_kwargs: Additional generation kwargs
@@ -75,6 +77,7 @@ class IntruderScorer(Classifier):
             client=client,
             verbose=verbose,
             n_examples_shown=n_examples_shown,
+            log_prob=log_probs,
             temperature=temperature,
             seed=seed,
             **generation_kwargs,
