@@ -262,18 +262,18 @@ def constructor(
 
     # Add activation examples to the record in place
     if constructor_cfg.center_examples:
-        token_windows, act_windows = pool_max_activation_windows(
+        token_windows, act_windows = pool_centered_activation_windows(
             activations=activations,
             tokens=reshaped_tokens,
+            n_windows_per_batch=n_windows_per_batch,
             ctx_indices=ctx_indices,
             index_within_ctx=index_within_ctx,
             ctx_len=example_ctx_len,
         )
     else:
-        token_windows, act_windows = pool_centered_activation_windows(
+        token_windows, act_windows = pool_max_activation_windows(
             activations=activations,
             tokens=reshaped_tokens,
-            n_windows_per_batch=n_windows_per_batch,
             ctx_indices=ctx_indices,
             index_within_ctx=index_within_ctx,
             ctx_len=example_ctx_len,
