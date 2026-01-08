@@ -66,7 +66,29 @@ class Pipe:
         """
         tasks = [function(input) for function in self.functions]
 
-        return await asyncio.gather(*tasks)
+        non_awaitable_tasks = [
+            (task_idx, task)
+            for task_idx, task in enumerate(tasks)
+            if not isinstance(task, Awaitable)
+        ]
+
+        awaitable_tasks = [
+            (task_idx, task)
+            for task_idx, task in enumerate(tasks)
+            if isinstance(task, Awaitable)
+        ]
+        awaitable_task_results = await asyncio.gather(
+            *[task for _, task in awaitable_tasks]
+        )
+
+        results = [None] * len(tasks)
+
+        for task_idx, result in non_awaitable_tasks:
+            results[task_idx] = result
+        for (task_idx, _task), result in zip(awaitable_tasks, awaitable_task_results):
+            results[task_idx] = result
+
+        return results
 
 
 class Pipeline:
