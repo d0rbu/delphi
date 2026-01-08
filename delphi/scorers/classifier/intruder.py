@@ -233,7 +233,10 @@ class IntruderScorer(Classifier):
                 + majority_examples[intruder_index:]
             )
 
-            example_activations = [example.activations.tolist() for example in examples]
+            example_activations = [
+                example.activations.tolist() for example in active_examples
+            ]
+            example_activations.insert(intruder_index, intruder.activations.tolist())
             example_tokens = [example.str_tokens for example in examples]
 
             batches.append(
