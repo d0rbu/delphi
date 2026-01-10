@@ -326,6 +326,30 @@ def constructor(
             cache_enabled=constructor_cfg.faiss_embedding_cache_enabled,
             cache_dir=constructor_cfg.faiss_embedding_cache_dir,
         )
+    elif source_non_activating == "quantile":
+        non_activating_examples = quantile_non_activating_windows(
+            activation_data=activation_data,
+            reshaped_tokens=reshaped_tokens,
+            cache_ctx_len=cache_ctx_len,
+            example_ctx_len=example_ctx_len,
+            n_windows=n_windows,
+            n_not_active=n_not_active,
+            quantile=constructor_cfg.non_activating_quantile,
+            tokenizer=tokenizer,
+            seed=seed,
+        )
+    elif source_non_activating == "threshold":
+        non_activating_examples = threshold_non_activating_windows(
+            activation_data=activation_data,
+            reshaped_tokens=reshaped_tokens,
+            cache_ctx_len=cache_ctx_len,
+            example_ctx_len=example_ctx_len,
+            n_windows=n_windows,
+            n_not_active=n_not_active,
+            threshold=constructor_cfg.non_activating_threshold,
+            tokenizer=tokenizer,
+            seed=seed,
+        )
     else:
         raise ValueError(f"Invalid non-activating source: {source_non_activating}")
     record.not_active = non_activating_examples
@@ -638,6 +662,206 @@ def neighbour_non_activation_windows(
             tokenizer=tokenizer,
         )
     return all_examples
+
+
+def compute_per_window_activations(
+    activation_data: ActivationData,
+    cache_ctx_len: int,
+    example_ctx_len: int,
+    n_windows: int,
+) -> Float[Tensor, "n_windows"]:
+    """
+    Compute per-window maximum activation values from stored activation data.
+
+    Args:
+        activation_data: Activation data containing locations and activations.
+        cache_ctx_len: Context length of the cached data.
+        example_ctx_len: Length of each example window.
+        n_windows: Total number of windows.
+
+    Returns:
+        Tensor of shape (n_windows,) with maximum activation per window.
+    """
+    # Initialize all windows with zero activation
+    window_activations = torch.zeros(n_windows, dtype=torch.float32)
+
+    if activation_data.locations.numel() == 0:
+        return window_activations
+
+    # Compute which window each activation belongs to
+    flat_indices = (
+        activation_data.locations[:, 0] * cache_ctx_len
+        + activation_data.locations[:, 1]
+    )
+    window_indices = flat_indices // example_ctx_len
+
+    # For each window, compute the maximum activation
+    for window_idx in range(n_windows):
+        mask = window_indices == window_idx
+        if mask.any():
+            window_activations[window_idx] = (
+                activation_data.activations[mask].max().item()
+            )
+
+    return window_activations
+
+
+def quantile_non_activating_windows(
+    activation_data: ActivationData,
+    reshaped_tokens: Int[Tensor, "windows ctx_len"],
+    cache_ctx_len: int,
+    example_ctx_len: int,
+    n_windows: int,
+    n_not_active: int,
+    quantile: float,
+    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+    seed: int = 42,
+) -> list[NonActivatingExample]:
+    """
+    Generate non-activating sequence windows based on activation quantile.
+
+    Args:
+        activation_data: Activation data for the latent.
+        reshaped_tokens: The tokens reshaped to the context length.
+        cache_ctx_len: Context length of the cached data.
+        example_ctx_len: Length of each example window.
+        n_windows: Total number of windows.
+        n_not_active: The number of non-activating examples to generate.
+        quantile: Quantile threshold (e.g., 0.1 for bottom 10%).
+        tokenizer: Tokenizer for decoding tokens.
+        seed: Random seed.
+
+    Returns:
+        List of non-activating examples.
+    """
+    torch.manual_seed(seed)
+    if n_not_active == 0:
+        return []
+
+    # Compute per-window activations
+    window_activations = compute_per_window_activations(
+        activation_data, cache_ctx_len, example_ctx_len, n_windows
+    )
+
+    # Compute quantile threshold
+    threshold = torch.quantile(window_activations, quantile).item()
+
+    # Find windows below the threshold
+    below_threshold = (
+        (window_activations <= threshold).nonzero(as_tuple=False).squeeze()
+    )
+
+    if below_threshold.numel() == 0:
+        logger.warning(
+            f"No windows found below quantile {quantile} (threshold: {threshold:.4f})"
+        )
+        return []
+
+    # If we have fewer windows than needed, use all available
+    if below_threshold.numel() < n_not_active:
+        logger.warning(
+            f"Only {below_threshold.numel()} windows below quantile, "
+            f"requested {n_not_active}"
+        )
+        selected_indices = below_threshold
+    else:
+        # Randomly sample from windows below threshold
+        random_indices = torch.randint(
+            0, below_threshold.shape[0], size=(n_not_active,)
+        )
+        selected_indices = below_threshold[random_indices]
+
+    toks = reshaped_tokens[selected_indices]
+    # Get actual activation values for selected windows
+    selected_activations = (
+        window_activations[selected_indices].unsqueeze(1).expand(-1, example_ctx_len)
+    )
+
+    return prepare_non_activating_examples(
+        toks,
+        selected_activations,
+        -1.0,
+        tokenizer,
+    )
+
+
+def threshold_non_activating_windows(
+    activation_data: ActivationData,
+    reshaped_tokens: Int[Tensor, "windows ctx_len"],
+    cache_ctx_len: int,
+    example_ctx_len: int,
+    n_windows: int,
+    n_not_active: int,
+    threshold: float | None,
+    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+    seed: int = 42,
+) -> list[NonActivatingExample]:
+    """
+    Generate non-activating sequence windows based on activation threshold.
+
+    Args:
+        activation_data: Activation data for the latent.
+        reshaped_tokens: The tokens reshaped to the context length.
+        cache_ctx_len: Context length of the cached data.
+        example_ctx_len: Length of each example window.
+        n_windows: Total number of windows.
+        n_not_active: The number of non-activating examples to generate.
+        threshold: Absolute threshold. If None, uses 10th percentile.
+        tokenizer: Tokenizer for decoding tokens.
+        seed: Random seed.
+
+    Returns:
+        List of non-activating examples.
+    """
+    torch.manual_seed(seed)
+    if n_not_active == 0:
+        return []
+
+    # Compute per-window activations
+    window_activations = compute_per_window_activations(
+        activation_data, cache_ctx_len, example_ctx_len, n_windows
+    )
+
+    # If threshold is None, use 10th percentile
+    if threshold is None:
+        threshold = torch.quantile(window_activations, 0.1).item()
+        logger.debug(f"Using computed threshold: {threshold:.4f} (10th percentile)")
+
+    # Find windows below the threshold
+    below_threshold = (
+        (window_activations <= threshold).nonzero(as_tuple=False).squeeze()
+    )
+
+    if below_threshold.numel() == 0:
+        logger.warning(f"No windows found below threshold {threshold:.4f}")
+        return []
+
+    # If we have fewer windows than needed, use all available
+    if below_threshold.numel() < n_not_active:
+        logger.warning(
+            f"Only {below_threshold.numel()} windows below threshold, "
+            f"requested {n_not_active}"
+        )
+        selected_indices = below_threshold
+    else:
+        # Randomly sample from windows below threshold
+        random_indices = torch.randint(
+            0, below_threshold.shape[0], size=(n_not_active,)
+        )
+        selected_indices = below_threshold[random_indices]
+
+    toks = reshaped_tokens[selected_indices]
+    # Get actual activation values for selected windows
+    selected_activations = (
+        window_activations[selected_indices].unsqueeze(1).expand(-1, example_ctx_len)
+    )
+
+    return prepare_non_activating_examples(
+        toks,
+        selected_activations,
+        -1.0,
+        tokenizer,
+    )
 
 
 def random_non_activating_windows(

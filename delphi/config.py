@@ -57,12 +57,27 @@ class ConstructorConfig(Serializable):
     Otherwise, windows will be used, and the activating example can be anywhere
     window."""
 
-    non_activating_source: Literal["random", "neighbours", "FAISS"] = "random"
+    non_activating_source: Literal[
+        "random", "neighbours", "FAISS", "quantile", "threshold"
+    ] = "random"
     """Source of non-activating examples. Random uses non-activating contexts
     sampled from any non activating window. Neighbours uses actvating contexts
     from pre-computed latent neighbours. FAISS uses semantic similarity search
     to find hard negatives that are semantically similar to activating examples
-    but don't activate the latent."""
+    but don't activate the latent. Quantile uses windows with activation values
+    below a specified quantile. Threshold uses windows with activation values
+    below a specified threshold."""
+
+    non_activating_quantile: float = 0.1
+    """Quantile threshold for selecting non-activating windows. Only used if
+    non_activating_source is 'quantile'. Windows with activation values below
+    this quantile will be considered non-activating. Defaults to 0.1 (bottom 10%)."""
+
+    non_activating_threshold: float | None = None
+    """Absolute threshold for selecting non-activating windows. Only used if
+    non_activating_source is 'threshold'. Windows with activation values below
+    this threshold will be considered non-activating. If None, will be computed
+    from the activation data."""
 
     neighbours_type: Literal[
         "co-occurrence", "decoder_similarity", "encoder_similarity"
