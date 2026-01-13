@@ -682,6 +682,10 @@ def compute_per_window_activations(
     Returns:
         Tensor of shape (n_windows,) with maximum activation per window.
     """
+    import time
+
+    start_time = time.perf_counter()
+
     # Initialize all windows with zero activation
     window_activations = torch.zeros(n_windows, dtype=torch.float32)
 
@@ -695,13 +699,34 @@ def compute_per_window_activations(
     )
     window_indices = flat_indices // example_ctx_len
 
+    # DEBUG: Log timing for this function
+    n_activations = len(activation_data.activations)
+    logger.debug(
+        f"[DEBUG] compute_per_window_activations: n_windows={n_windows},"
+        f"n_activations={n_activations}"
+    )
+
+    loop_start = time.perf_counter()
+
     # For each window, compute the maximum activation
+    # WARNING: This is O(n_windows) and is likely the performance bottleneck!
     for window_idx in range(n_windows):
         mask = window_indices == window_idx
         if mask.any():
             window_activations[window_idx] = (
                 activation_data.activations[mask].max().item()
             )
+
+    loop_end = time.perf_counter()
+    total_time = loop_end - start_time
+    loop_time = loop_end - loop_start
+
+    logger.warning(
+        f"[DEBUG TIMING] compute_per_window_activations: "
+        f"total={total_time:.2f}s, loop={loop_time:.2f}s, "
+        f"n_windows={n_windows}, n_activations={n_activations}, "
+        f"per_window_avg={loop_time/n_windows*1000:.3f}ms"
+    )
 
     return window_activations
 

@@ -332,16 +332,38 @@ class LatentDataset:
         Synchronous iterator that wraps the asynchronous iterator.
         Creates a new event loop to drive the async generator.
         """
+        import time
+
+        from delphi import logger
+
         # Create a new event loop.
         loop = asyncio.new_event_loop()
         async_gen = self.__aiter__()
+        item_count = 0
+        total_start = time.perf_counter()
         try:
             while True:
                 # Retrieve the next item from the asynchronous iterator
+                item_start = time.perf_counter()
                 record = loop.run_until_complete(anext(async_gen))
+                item_time = time.perf_counter() - item_start
                 if record is not None:
+                    item_count += 1
+                    if item_count <= 5 or item_count % 100 == 0:
+                        logger.warning(
+                            f"[DEBUG TIMING] LatentDataset.__iter__ yielded "
+                            f"item {item_count}: took {item_time:.2f}s to get next item"
+                        )
                     yield record
         except StopAsyncIteration:
+            total_time = time.perf_counter() - total_start
+            logger.warning(
+                f"[DEBUG TIMING] LatentDataset.__iter__ finished: "
+                f"total={total_time:.2f}s, items={item_count}, "
+                f"avg_per_item={total_time/item_count:.2f}s"
+                if item_count > 0
+                else ""
+            )
             return
         finally:
             loop.close()
@@ -415,6 +437,12 @@ class LatentDataset:
         Returns:
             Optional[LatentRecord]: Processed latent record or None.
         """
+        import time
+
+        from delphi import logger
+
+        start_time = time.perf_counter()
+
         # This should never happen but we need to type check
         if self.tokens is None:
             raise ValueError("Tokens are not loaded")
@@ -433,6 +461,8 @@ class LatentDataset:
                     str(latent_data.latent.latent_index)
                 ],
             )
+
+        constructor_start = time.perf_counter()
         record = constructor(
             record=record,
             activation_data=latent_data.activation_data,
@@ -441,7 +471,24 @@ class LatentDataset:
             tokenizer=self.tokenizer,
             all_data=self.all_data[latent_data.module],
         )
+        constructor_time = time.perf_counter() - constructor_start
+
         if record is None:
+            logger.warning(
+                f"[DEBUG TIMING] _process_latent for {latent_data.latent}: "
+                f"returned None, constructor_time={constructor_time:.2f}s"
+            )
             return None
+
+        sampler_start = time.perf_counter()
         record = sampler(record, self.sampler_cfg, self.tokenizer)
+        sampler_time = time.perf_counter() - sampler_start
+
+        total_time = time.perf_counter() - start_time
+        logger.warning(
+            f"[DEBUG TIMING] _process_latent for {latent_data.latent}: "
+            f"total={total_time:.2f}s, constructor={constructor_time:.2f}s, "
+            f"sampler={sampler_time:.2f}s, n_active={n_active}"
+        )
+
         return record

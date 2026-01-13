@@ -180,12 +180,30 @@ class Pipeline:
         Returns:
             Any: The processed item.
         """
+        import logging
+        import time
+
+        start_time = time.perf_counter()
+        item_name = (
+            getattr(item, "latent", item) if hasattr(item, "latent") else str(item)[:50]
+        )
+
         async with semaphore:
             result = item
-            for pipe in self.pipes:
+            pipe_times = []
+            for pipe_idx, pipe in enumerate(self.pipes):
                 if result is None:
                     return None
 
+                pipe_start = time.perf_counter()
                 result = await pipe(result)
+                pipe_time = time.perf_counter() - pipe_start
+                pipe_times.append(pipe_time)
+
+        total_time = time.perf_counter() - start_time
+        logging.warning(
+            f"[DEBUG TIMING] Pipeline.process_item for {item_name}: "
+            f"total={total_time:.2f}s, pipe_times={[f'{t:.2f}s' for t in pipe_times]}"
+        )
 
         return result

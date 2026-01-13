@@ -259,15 +259,40 @@ class IntruderScorer(Classifier):
         """
         Send and gather batches of samples to the model.
         """
+        import time
+
+        start_time = time.perf_counter()
+        n_samples = len(samples)
+        logger.debug(f"[DEBUG] IntruderScorer._query starting with {n_samples} samples")
+
         sem = asyncio.Semaphore(1)
+        completed_count = 0
 
         async def _process(sample):
+            nonlocal completed_count
             async with sem:
+                sample_start = time.perf_counter()
                 result = await self._generate(sample)
+                sample_time = time.perf_counter() - sample_start
+                completed_count += 1
+                if completed_count <= 3 or completed_count == n_samples:
+                    logger.debug(
+                        f"[DEBUG] IntruderScorer sample {completed_count}/{n_samples}: "
+                        f"took {sample_time:.2f}s"
+                    )
                 return result
 
         tasks = [asyncio.create_task(_process(sample)) for sample in samples]
         results = await asyncio.gather(*tasks)
+
+        total_time = time.perf_counter() - start_time
+        avg_time = total_time / n_samples if n_samples > 0 else 0
+        logger.warning(
+            f"[DEBUG TIMING] IntruderScorer._query: "
+            f"total={total_time:.2f}s, n_samples={n_samples}, "
+            f"avg_per_sample={avg_time:.2f}s "
+            "(Semaphore=1 causes sequential processing!)"
+        )
 
         return results
 
