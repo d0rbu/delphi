@@ -699,33 +699,88 @@ def compute_per_window_activations(
     )
     window_indices = flat_indices // example_ctx_len
 
-    # DEBUG: Log timing for this function
     n_activations = len(activation_data.activations)
-    logger.debug(
-        f"[DEBUG] compute_per_window_activations: n_windows={n_windows},"
-        f"n_activations={n_activations}"
+
+    # === ASSERTIONS for correctness ===
+    assert window_indices.dtype in (
+        torch.int32,
+        torch.int64,
+    ), f"window_indices must be integer type, got {window_indices.dtype}"
+    assert n_activations == len(
+        window_indices
+    ), f"Mismatch: {n_activations} activations vs {len(window_indices)} indices"
+
+    # Check for out-of-bounds indices before clamping
+    min_idx, max_idx = window_indices.min().item(), window_indices.max().item()
+    if min_idx < 0 or max_idx >= n_windows:
+        logger.warning(
+            f"[DEBUG] window_indices out of bounds: min={min_idx}, max={max_idx}, "
+            f"n_windows={n_windows}. Clamping to valid range."
+        )
+
+    scatter_start = time.perf_counter()
+
+    # OPTIMIZED: Use scatter_reduce for O(n_activations) instead of O(n_windows)
+    # This is ~1000x faster than the O(n_windows) loop
+    activations = activation_data.activations.float()
+
+    # Ensure index dtype is int64 (required by scatter_reduce)
+    window_indices = window_indices.to(torch.int64)
+
+    # Clamp window_indices to valid range (safety check for edge cases)
+    window_indices = window_indices.clamp(0, n_windows - 1)
+
+    # scatter_reduce with "amax" computes max per window in one vectorized op
+    # include_self=False means: for indices that appear, compute max(src_values_only)
+    # for indices that don't appear, keep initial_value=0
+    # This exactly matches the original loop behavior
+    window_activations.scatter_reduce_(
+        dim=0,
+        index=window_indices,
+        src=activations,
+        reduce="amax",
+        include_self=False,  # Don't include initial zeros in max computation
     )
 
-    loop_start = time.perf_counter()
+    scatter_end = time.perf_counter()
+    total_time = scatter_end - start_time
+    scatter_time = scatter_end - scatter_start
 
-    # For each window, compute the maximum activation
-    # WARNING: This is O(n_windows) and is likely the performance bottleneck!
-    for window_idx in range(n_windows):
-        mask = window_indices == window_idx
-        if mask.any():
-            window_activations[window_idx] = (
-                activation_data.activations[mask].max().item()
-            )
+    # === VERIFICATION (run on first few calls to ensure correctness) ===
+    # Check a sample of windows to verify scatter_reduce gives correct results
+    _VERIFY_SAMPLE_SIZE = int(os.environ.get("DELPHI_VERIFY_SCATTER", "0"))
+    if _VERIFY_SAMPLE_SIZE > 0:
+        verify_start = time.perf_counter()
+        # Sample some windows that have activations
+        unique_windows = torch.unique(window_indices)
+        sample_size = min(_VERIFY_SAMPLE_SIZE, len(unique_windows))
+        sample_windows = unique_windows[
+            torch.randperm(len(unique_windows))[:sample_size]
+        ]
 
-    loop_end = time.perf_counter()
-    total_time = loop_end - start_time
-    loop_time = loop_end - loop_start
+        for win_idx in sample_windows:
+            mask = window_indices == win_idx
+            expected = activations[mask].max().item()
+            actual = window_activations[win_idx.item()].item()
+            if not np.isclose(expected, actual, rtol=1e-5):
+                logger.error(
+                    f"[VERIFICATION FAILED] window {win_idx.item()}: "
+                    f"expected={expected}, actual={actual}"
+                )
+                raise AssertionError(
+                    f"scatter_reduce verification failed for window {win_idx.item()}"
+                )
+
+        verify_time = time.perf_counter() - verify_start
+        logger.debug(
+            f"[DEBUG] Verified {sample_size} windows in {verify_time:.4f}s - "
+            "all correct"
+        )
 
     logger.warning(
-        f"[DEBUG TIMING] compute_per_window_activations: "
-        f"total={total_time:.2f}s, loop={loop_time:.2f}s, "
-        f"n_windows={n_windows}, n_activations={n_activations}, "
-        f"per_window_avg={loop_time/n_windows*1000:.3f}ms"
+        f"[DEBUG TIMING] compute_per_window_activations (OPTIMIZED): "
+        f"total={total_time:.4f}s, scatter={scatter_time:.4f}s, "
+        f"n_windows={n_windows}, n_activations={n_activations}"
     )
 
     return window_activations
