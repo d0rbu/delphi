@@ -1,5 +1,6 @@
 import hashlib
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -194,21 +195,120 @@ def pool_centered_activation_windows(
         temp_tensor  # Set current window activations
     )
 
-    # Set previous window activations where available
-    prev_mask = torch.isin(prev_indices, unique_ctx_indices)
-    if prev_mask.any():
-        prev_locations = torch.where(
-            unique_ctx_indices.unsqueeze(1) == prev_indices.unsqueeze(0)
-        )[1]
-        final_tensor[prev_mask, :ctx_len] = temp_tensor[prev_locations]
+    # OPTIMIZED: Use searchsorted instead of O(N²) comparison
+    # Create a mapping from context index to position in our sorted arrays
+    # Since unique_ctx_indices is sorted by activation (descending), we need to
+    # sort it again to use searchsorted efficiently
+    sorted_for_lookup, sort_order = torch.sort(unique_ctx_indices)
+    inverse_sort_order = torch.argsort(sort_order)
 
-    # Set next window activations where available
-    next_mask = torch.isin(next_indices, unique_ctx_indices)
-    if next_mask.any():
-        next_locations = torch.where(
-            unique_ctx_indices.unsqueeze(1) == next_indices.unsqueeze(0)
-        )[1]
-        final_tensor[next_mask, ctx_len * 2 :] = temp_tensor[next_locations]
+    # === ASSERTIONS: Verify sorting invariants ===
+    assert torch.all(
+        sorted_for_lookup[:-1] <= sorted_for_lookup[1:]
+    ), "sorted_for_lookup must be sorted in ascending order"
+    assert torch.all(
+        unique_ctx_indices[sort_order] == sorted_for_lookup
+    ), "sort_order must correctly map unique_ctx_indices to sorted_for_lookup"
+    assert torch.all(
+        sorted_for_lookup[inverse_sort_order] == unique_ctx_indices
+    ), "inverse_sort_order must correctly invert the sort"
+
+    # Set previous window activations where available using O(N log N) searchsorted
+    prev_search_positions = torch.searchsorted(sorted_for_lookup, prev_indices)
+    # Clamp to valid range and check if we found the exact value
+    prev_search_positions = prev_search_positions.clamp(0, len(sorted_for_lookup) - 1)
+    prev_found_mask = sorted_for_lookup[prev_search_positions] == prev_indices
+
+    # === ASSERTION: Verify prev_found_mask matches torch.isin ===
+    expected_prev_mask = torch.isin(prev_indices, unique_ctx_indices)
+    assert torch.all(prev_found_mask == expected_prev_mask), (
+        f"prev_found_mask mismatch: searchsorted found {prev_found_mask.sum().item()} "
+        f"but isin found {expected_prev_mask.sum().item()}"
+    )
+
+    if prev_found_mask.any():
+        # Map from sorted position back to original position in temp_tensor
+        prev_locations = inverse_sort_order[prev_search_positions[prev_found_mask]]
+
+        # === ASSERTION: Verify prev_locations point to correct context indices ===
+        # The context index at prev_locations should equal prev_indices for found items
+        assert torch.all(
+            unique_ctx_indices[prev_locations] == prev_indices[prev_found_mask]
+        ), "prev_locations must map to the correct context indices"
+
+        final_tensor[prev_found_mask, :ctx_len] = temp_tensor[prev_locations]
+
+    # Set next window activations where available using O(N log N) searchsorted
+    next_search_positions = torch.searchsorted(sorted_for_lookup, next_indices)
+    next_search_positions = next_search_positions.clamp(0, len(sorted_for_lookup) - 1)
+    next_found_mask = sorted_for_lookup[next_search_positions] == next_indices
+
+    # === ASSERTION: Verify next_found_mask matches torch.isin ===
+    expected_next_mask = torch.isin(next_indices, unique_ctx_indices)
+    assert torch.all(next_found_mask == expected_next_mask), (
+        f"next_found_mask mismatch: searchsorted found {next_found_mask.sum().item()} "
+        f"but isin found {expected_next_mask.sum().item()}"
+    )
+
+    if next_found_mask.any():
+        next_locations = inverse_sort_order[next_search_positions[next_found_mask]]
+
+        # === ASSERTION: Verify next_locations point to correct context indices ===
+        assert torch.all(
+            unique_ctx_indices[next_locations] == next_indices[next_found_mask]
+        ), "next_locations must map to the correct context indices"
+
+        final_tensor[next_found_mask, ctx_len * 2 :] = temp_tensor[next_locations]
+
+    # === OPTIONAL FULL VERIFICATION against original O(N²) implementation ===
+    # Enable with DELPHI_VERIFY_POOL_CENTERED=1 for debugging (slow!)
+    if os.environ.get("DELPHI_VERIFY_POOL_CENTERED", "0") == "1":
+        logger.warning(
+            "[VERIFICATION MODE] Comparing optimized searchsorted against original "
+            f"O(N²) implementation (n_windows={n_windows})"
+        )
+        # Create reference using original O(N²) approach
+        reference_tensor = torch.zeros(
+            (n_windows, ctx_len * 3), dtype=activations.dtype
+        )
+        reference_tensor[:, ctx_len : ctx_len * 2] = temp_tensor
+
+        # Original O(N²) prev window logic
+        orig_prev_mask = torch.isin(prev_indices, unique_ctx_indices)
+        if orig_prev_mask.any():
+            orig_prev_locations = torch.where(
+                unique_ctx_indices.unsqueeze(1) == prev_indices.unsqueeze(0)
+            )[1]
+            reference_tensor[orig_prev_mask, :ctx_len] = temp_tensor[
+                orig_prev_locations
+            ]
+
+        # Original O(N²) next window logic
+        orig_next_mask = torch.isin(next_indices, unique_ctx_indices)
+        if orig_next_mask.any():
+            orig_next_locations = torch.where(
+                unique_ctx_indices.unsqueeze(1) == next_indices.unsqueeze(0)
+            )[1]
+            reference_tensor[orig_next_mask, ctx_len * 2 :] = temp_tensor[
+                orig_next_locations
+            ]
+
+        # Compare
+        if not torch.allclose(final_tensor, reference_tensor):
+            diff_mask = final_tensor != reference_tensor
+            n_diffs = diff_mask.sum().item()
+            logger.error(
+                "[VERIFICATION FAILED] final_tensor differs from reference in "
+                f"{n_diffs} elements"
+            )
+            raise AssertionError(
+                "Optimized pool_centered_activation_windows differs from original: "
+                f"{n_diffs} mismatches"
+            )
+        else:
+            logger.warning(
+                "[VERIFICATION PASSED] Optimized implementation matches original"
+            )
 
     # Find max activation indices
     max_activation_indices = torch.argmax(temp_tensor, dim=1) + ctx_len
@@ -236,12 +336,16 @@ def constructor(
     all_data: Optional[dict[int, ActivationData]] = None,
     seed: int = 42,
 ) -> LatentRecord | None:
+    total_start = time.perf_counter()
+
     cache_ctx_len = tokens.shape[1]
     example_ctx_len = constructor_cfg.example_ctx_len
     source_non_activating = constructor_cfg.non_activating_source
     n_not_active = constructor_cfg.n_non_activating
     min_examples = constructor_cfg.min_examples
+
     # Get all positions where the latent is active
+    prep_start = time.perf_counter()
     flat_indices = (
         activation_data.locations[:, 0] * cache_ctx_len
         + activation_data.locations[:, 1]
@@ -259,8 +363,10 @@ def constructor(
     activations = activation_data.activations
     # per context frequency
     record.per_context_frequency = len(unique_batch_pos) / n_windows
+    prep_time = time.perf_counter() - prep_start
 
     # Add activation examples to the record in place
+    pool_start = time.perf_counter()
     if constructor_cfg.center_examples:
         token_windows, act_windows = pool_centered_activation_windows(
             activations=activations,
@@ -278,6 +384,9 @@ def constructor(
             index_within_ctx=index_within_ctx,
             ctx_len=example_ctx_len,
         )
+    pool_time = time.perf_counter() - pool_start
+
+    examples_start = time.perf_counter()
     record.examples = [
         ActivatingExample(
             tokens=toks,
@@ -285,6 +394,8 @@ def constructor(
         )
         for toks, acts in zip(token_windows, act_windows)
     ]
+    examples_time = time.perf_counter() - examples_start
+
     if len(record.examples) < min_examples:
         logger.warning(
             f"Not enough examples to explain the latent: {len(record.examples)}"
@@ -292,6 +403,7 @@ def constructor(
         # Not enough examples to explain the latent
         return None
 
+    non_act_start = time.perf_counter()
     if source_non_activating == "random":
         # Add random non-activating examples to the record in place
         non_activating_examples = random_non_activating_windows(
@@ -352,7 +464,20 @@ def constructor(
         )
     else:
         raise ValueError(f"Invalid non-activating source: {source_non_activating}")
+    non_act_time = time.perf_counter() - non_act_start
     record.not_active = non_activating_examples
+
+    total_time = time.perf_counter() - total_start
+    n_active = len(activation_data.activations)
+    n_unique_windows = len(unique_batch_pos)
+
+    logger.debug(
+        f"[DEBUG TIMING] constructor: total={total_time:.2f}s, "
+        f"prep={prep_time:.2f}s, pool={pool_time:.2f}s, "
+        f"examples={examples_time:.2f}s, non_act={non_act_time:.2f}s, "
+        f"n_active={n_active}, n_unique_windows={n_unique_windows}"
+    )
+
     return record
 
 
