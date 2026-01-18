@@ -122,135 +122,7 @@ def pool_max_activation_windows(
     return token_windows, activation_windows
 
 
-# =============================================================================
-# TODO(DELETE_AFTER_VERIFICATION): Remove _fill_neighbor_activations_old after
-# confirming _fill_neighbor_activations_new works correctly in production.
-# The _old version is O(N²) and kept only for verification.
-# =============================================================================
-
-
-def _fill_neighbor_activations_old(
-    final_tensor: Float[Tensor, "n_windows ctx_len_times_3"],
-    temp_tensor: Float[Tensor, "n_windows ctx_len"],
-    unique_ctx_indices: Int[Tensor, "n_windows"],
-    prev_indices: Int[Tensor, "n_windows"],
-    next_indices: Int[Tensor, "n_windows"],
-    ctx_len: int,
-) -> None:
-    """
-    TODO(DELETE_AFTER_VERIFICATION): Original O(N²) implementation.
-    Fill in neighbor window activations using O(N²) torch.where comparison.
-    This is the reference implementation kept for verification.
-    """
-    # Set previous window activations where available
-    prev_mask = torch.isin(prev_indices, unique_ctx_indices)
-    if prev_mask.any():
-        prev_locations = torch.where(
-            unique_ctx_indices.unsqueeze(1) == prev_indices.unsqueeze(0)
-        )[1]
-        final_tensor[prev_mask, :ctx_len] = temp_tensor[prev_locations]
-
-    # Set next window activations where available
-    next_mask = torch.isin(next_indices, unique_ctx_indices)
-    if next_mask.any():
-        next_locations = torch.where(
-            unique_ctx_indices.unsqueeze(1) == next_indices.unsqueeze(0)
-        )[1]
-        final_tensor[next_mask, ctx_len * 2 :] = temp_tensor[next_locations]
-
-
-def _fill_neighbor_activations_new(
-    final_tensor: Float[Tensor, "n_windows ctx_len_times_3"],
-    temp_tensor: Float[Tensor, "n_windows ctx_len"],
-    unique_ctx_indices: Int[Tensor, "n_windows"],
-    prev_indices: Int[Tensor, "n_windows"],
-    next_indices: Int[Tensor, "n_windows"],
-    ctx_len: int,
-) -> None:
-    """
-    Optimized O(N log N) implementation using searchsorted.
-    Fill in neighbor window activations efficiently.
-    """
-    n_windows = len(unique_ctx_indices)
-
-    # Sort unique_ctx_indices to enable binary search
-    # sort_order[i] = position in unique_ctx_indices of the i-th smallest value
-    # i.e., unique_ctx_indices[sort_order] == sorted_for_lookup
-    sorted_for_lookup, sort_order = torch.sort(unique_ctx_indices)
-
-    # === ASSERTIONS: Verify sorting invariants ===
-    assert (
-        len(sorted_for_lookup) == n_windows
-    ), f"sorted_for_lookup length {len(sorted_for_lookup)} != n_windows {n_windows}"
-    assert torch.all(
-        sorted_for_lookup[:-1] <= sorted_for_lookup[1:]
-    ), "sorted_for_lookup must be sorted in ascending order"
-    assert torch.all(
-        unique_ctx_indices[sort_order] == sorted_for_lookup
-    ), "sort_order must correctly map unique_ctx_indices to sorted_for_lookup"
-
-    # --- Process previous window activations ---
-    # Find where prev_indices would be inserted in sorted array
-    prev_search_positions = torch.searchsorted(sorted_for_lookup, prev_indices)
-    # Clamp to valid range for indexing
-    prev_search_positions_clamped = prev_search_positions.clamp(0, n_windows - 1)
-    # Check if we actually found the exact value (not just insertion point)
-    prev_found_mask = sorted_for_lookup[prev_search_positions_clamped] == prev_indices
-
-    # === ASSERTION: Verify mask matches torch.isin ===
-    expected_prev_mask = torch.isin(prev_indices, unique_ctx_indices)
-    assert torch.all(prev_found_mask == expected_prev_mask), (
-        f"prev_found_mask mismatch: searchsorted found {prev_found_mask.sum().item()} "
-        f"but isin found {expected_prev_mask.sum().item()}"
-    )
-
-    if prev_found_mask.any():
-        # Get positions in sorted array for found items
-        found_sorted_positions = prev_search_positions_clamped[prev_found_mask]
-        # Map back to positions in unique_ctx_indices (which indexes temp_tensor)
-        # sort_order[p] gives the position in unique_ctx_indices of sorted_for_lookup[p]
-        prev_locations = sort_order[found_sorted_positions]
-
-        # === ASSERTION: Verify locations point to correct context indices ===
-        assert torch.all(
-            unique_ctx_indices[prev_locations] == prev_indices[prev_found_mask]
-        ), (
-            f"prev_locations incorrect: unique_ctx_indices[prev_locations]="
-            f"{unique_ctx_indices[prev_locations][:5].tolist()}, "
-            f"prev_indices[prev_found_mask]={prev_indices[prev_found_mask][:5].tolist()}"
-        )
-
-        final_tensor[prev_found_mask, :ctx_len] = temp_tensor[prev_locations]
-
-    # --- Process next window activations ---
-    next_search_positions = torch.searchsorted(sorted_for_lookup, next_indices)
-    next_search_positions_clamped = next_search_positions.clamp(0, n_windows - 1)
-    next_found_mask = sorted_for_lookup[next_search_positions_clamped] == next_indices
-
-    # === ASSERTION: Verify mask matches torch.isin ===
-    expected_next_mask = torch.isin(next_indices, unique_ctx_indices)
-    assert torch.all(next_found_mask == expected_next_mask), (
-        f"next_found_mask mismatch: searchsorted found {next_found_mask.sum().item()} "
-        f"but isin found {expected_next_mask.sum().item()}"
-    )
-
-    if next_found_mask.any():
-        found_sorted_positions = next_search_positions_clamped[next_found_mask]
-        next_locations = sort_order[found_sorted_positions]
-
-        # === ASSERTION: Verify locations point to correct context indices ===
-        assert torch.all(
-            unique_ctx_indices[next_locations] == next_indices[next_found_mask]
-        ), (
-            f"next_locations incorrect: unique_ctx_indices[next_locations]="
-            f"{unique_ctx_indices[next_locations][:5].tolist()}, "
-            f"next_indices[next_found_mask]={next_indices[next_found_mask][:5].tolist()}"
-        )
-
-        final_tensor[next_found_mask, ctx_len * 2 :] = temp_tensor[next_locations]
-
-
-def pool_centered_activation_windows(
+def pool_centered_activation_windows_old(
     activations: Float[Tensor, "examples"],
     tokens: Float[Tensor, "windows seq"],
     n_windows_per_batch: int,
@@ -275,13 +147,63 @@ def pool_centered_activation_windows(
         max_examples : The maximum number of examples.
     """
 
+    # === Input Assertions ===
+    assert activations.dim() == 1, f"activations must be 1D, got {activations.dim()}D"
+    assert tokens.dim() == 2, f"tokens must be 2D, got {tokens.dim()}D"
+    assert ctx_indices.dim() == 1, f"ctx_indices must be 1D, got {ctx_indices.dim()}D"
+    assert (
+        index_within_ctx.dim() == 1
+    ), f"index_within_ctx must be 1D, got {index_within_ctx.dim()}D"
+    assert len(activations) == len(ctx_indices), (
+        f"activations and ctx_indices length mismatch: {len(activations)} vs "
+        f"{len(ctx_indices)}"
+    )
+    assert len(activations) == len(index_within_ctx), (
+        f"activations and index_within_ctx length mismatch: {len(activations)} vs "
+        f"{len(index_within_ctx)}"
+    )
+    assert (
+        tokens.shape[1] == ctx_len
+    ), f"tokens seq dim must equal ctx_len: {tokens.shape[1]} vs {ctx_len}"
+    assert n_windows_per_batch > 0, "n_windows_per_batch must be positive"
+    assert ctx_len > 0, "ctx_len must be positive"
+    assert (
+        index_within_ctx.min() >= 0
+    ), f"index_within_ctx has negative values: min={index_within_ctx.min().item()}"
+    assert (
+        index_within_ctx.max() < ctx_len
+    ), f"index_within_ctx out of bounds: max={index_within_ctx.max().item()}, "
+    f"ctx_len={ctx_len}"
+
     # Get unique context indices and their counts like in pool_max_activation_windows
     unique_ctx_indices, inverses, lengths = torch.unique_consecutive(
         ctx_indices, return_counts=True, return_inverse=True
     )
 
+    # === Assertions after unique_consecutive ===
+    assert len(unique_ctx_indices) == len(
+        lengths
+    ), "unique_ctx_indices and lengths must have same length"
+    assert lengths.sum() == len(activations), (
+        "lengths sum ({lengths.sum()}) must equal activations count "
+        f"({len(activations)})"
+    )
+
+    assert inverses.max() < len(
+        unique_ctx_indices
+    ), "inverses must index into unique_ctx_indices"
+
     # Get the max activation magnitude within each context window
     max_buffer = torch.segment_reduce(activations, "max", lengths=lengths)
+
+    # === Assertions after segment_reduce ===
+    assert len(max_buffer) == len(unique_ctx_indices), (
+        f"max_buffer length ({len(max_buffer)}) must match unique windows "
+        f"({len(unique_ctx_indices)})"
+    )
+    assert not torch.isnan(
+        max_buffer
+    ).any(), "max_buffer contains NaN values after segment_reduce"
 
     # Get the top max_examples windows
     sorted_values, sorted_indices = torch.sort(max_buffer, descending=True)
@@ -289,6 +211,12 @@ def pool_centered_activation_windows(
     # this tensor has the correct activations for each context window
     temp_tensor = torch.zeros(len(unique_ctx_indices), ctx_len, dtype=activations.dtype)
     temp_tensor[inverses, index_within_ctx] = activations
+
+    # === Assertions after temp_tensor creation ===
+    assert (
+        temp_tensor.shape[0] == len(unique_ctx_indices)
+        and temp_tensor.shape[1] == ctx_len
+    ), f"temp_tensor shape mismatch: {temp_tensor.shape}"
 
     unique_ctx_indices = unique_ctx_indices[sorted_indices]
     temp_tensor = temp_tensor[sorted_indices]
@@ -300,6 +228,10 @@ def pool_centered_activation_windows(
     # remove also the elements that are at the end of the batch
     not_last_position = modulo != n_windows_per_batch - 1
     mask = not_first_position & not_last_position
+
+    # === Assertions after mask creation ===
+    assert mask.dtype == torch.bool, f"mask must be boolean, got {mask.dtype}"
+
     unique_ctx_indices = unique_ctx_indices[mask]
     temp_tensor = temp_tensor[mask]
     if len(unique_ctx_indices) == 0:
@@ -308,14 +240,38 @@ def pool_centered_activation_windows(
     # Vectorized operations for all windows at once
     n_windows = len(unique_ctx_indices)
 
+    # === Assertions after filtering ===
+    assert n_windows > 0, "n_windows must be positive after filtering"
+    assert (
+        temp_tensor.shape[0] == n_windows
+    ), f"temp_tensor rows ({temp_tensor.shape[0]}) must equal n_windows ({n_windows})"
+
     # Create indices for previous, current, and next windows
     prev_indices = unique_ctx_indices - 1
     next_indices = unique_ctx_indices + 1
+
+    # === Assertions for prev/next indices ===
+    assert (
+        prev_indices >= 0
+    ).all(), f"prev_indices has negative values (min={prev_indices.min().item()})"
+    assert (next_indices < tokens.shape[0]).all(), (
+        f"next_indices out of bounds (max={next_indices.max().item()}, "
+        f"tokens.shape[0]={tokens.shape[0]})"
+    )
 
     # Create a tensor to hold all concatenated tokens
     all_tokens = torch.cat(
         [tokens[prev_indices], tokens[unique_ctx_indices], tokens[next_indices]], dim=1
     )  # Shape: [n_windows, ctx_len*3]
+
+    # === Assertions after all_tokens creation ===
+    assert all_tokens.shape == (
+        n_windows,
+        ctx_len * 3,
+    ), (
+        f"all_tokens shape mismatch: {all_tokens.shape} vs expected "
+        f"({n_windows}, {ctx_len * 3})"
+    )
 
     # Create tensor for all activations
     final_tensor = torch.zeros((n_windows, ctx_len * 3), dtype=activations.dtype)
@@ -323,81 +279,375 @@ def pool_centered_activation_windows(
         temp_tensor  # Set current window activations
     )
 
-    # ==========================================================================
-    # TODO(DELETE_AFTER_VERIFICATION): Run both implementations and compare.
-    # Once verified in production, keep only _fill_neighbor_activations_new
-    # and remove _fill_neighbor_activations_old and this comparison block.
-    # ==========================================================================
-
-    # Run OLD implementation on a copy
-    old_start = time.perf_counter()
-    final_tensor_old = final_tensor.clone()
-    _fill_neighbor_activations_old(
-        final_tensor_old,
-        temp_tensor,
-        unique_ctx_indices,
-        prev_indices,
-        next_indices,
-        ctx_len,
-    )
-    old_time = time.perf_counter() - old_start
-
-    # Run NEW implementation on the actual tensor
-    new_start = time.perf_counter()
-    _fill_neighbor_activations_new(
-        final_tensor,
-        temp_tensor,
-        unique_ctx_indices,
-        prev_indices,
-        next_indices,
-        ctx_len,
-    )
-    new_time = time.perf_counter() - new_start
-
-    # === CRITICAL ASSERTION: Verify both implementations produce identical results ===
-    if not torch.allclose(final_tensor, final_tensor_old, rtol=1e-5, atol=1e-8):
-        diff_mask = ~torch.isclose(final_tensor, final_tensor_old, rtol=1e-5, atol=1e-8)
-        n_diffs = diff_mask.sum().item()
-
-        # Find first few differences for debugging
-        diff_indices = diff_mask.nonzero()[:10]
-        diff_details = []
-        for idx in diff_indices:
-            i, j = idx[0].item(), idx[1].item()
-            diff_details.append(
-                f"  [{i},{j}]: old={final_tensor_old[i,j].item():.6f}, "
-                f"new={final_tensor[i,j].item():.6f}"
-            )
-
-        error_msg = (
-            f"[CRITICAL] _fill_neighbor_activations_new differs from _old!\n"
-            f"  n_windows={n_windows}, n_diffs={n_diffs}\n"
-            f"  First differences:\n" + "\n".join(diff_details)
+    # Set previous window activations where available
+    prev_mask = torch.isin(prev_indices, unique_ctx_indices)
+    if prev_mask.any():
+        prev_locations = torch.where(
+            unique_ctx_indices.unsqueeze(1) == prev_indices.unsqueeze(0)
+        )[1]
+        # === Assertions for prev_locations ===
+        assert len(prev_locations) == prev_mask.sum(), (
+            f"prev_locations length ({len(prev_locations)}) must match "
+            f"prev_mask count ({prev_mask.sum().item()})"
         )
-        logger.error(error_msg)
-        raise AssertionError(error_msg)
+        assert (
+            prev_locations < n_windows
+        ).all(), f"prev_locations out of bounds: max={prev_locations.max().item()}"
+        final_tensor[prev_mask, :ctx_len] = temp_tensor[prev_locations]
 
-    # Log timing comparison
-    speedup = old_time / new_time if new_time > 0 else float("inf")
-    logger.debug(
-        f"[TIMING] _fill_neighbor_activations: old={old_time:.4f}s, "
-        f"new={new_time:.4f}s, speedup={speedup:.1f}x, n_windows={n_windows}"
-    )
+    # Set next window activations where available
+    next_mask = torch.isin(next_indices, unique_ctx_indices)
+    if next_mask.any():
+        next_locations = torch.where(
+            unique_ctx_indices.unsqueeze(1) == next_indices.unsqueeze(0)
+        )[1]
+        # === Assertions for next_locations ===
+        assert len(next_locations) == next_mask.sum(), (
+            f"next_locations length ({len(next_locations)}) must match "
+            f"next_mask count ({next_mask.sum().item()})"
+        )
+        assert (
+            next_locations < n_windows
+        ).all(), f"next_locations out of bounds: max={next_locations.max().item()}"
+        final_tensor[next_mask, ctx_len * 2 :] = temp_tensor[next_locations]
 
     # Find max activation indices
     max_activation_indices = torch.argmax(temp_tensor, dim=1) + ctx_len
 
+    # === Assertions for max_activation_indices ===
+    assert (
+        len(max_activation_indices) == n_windows
+    ), "max_activation_indices length mismatch"
+    assert (
+        max_activation_indices >= ctx_len
+    ).all(), "max_activation_indices must be >= ctx_len"
+    assert (
+        max_activation_indices < ctx_len * 2
+    ).all(), "max_activation_indices must be < ctx_len*2"
+
     # Calculate left for all windows
     left_positions = max_activation_indices - (ctx_len - ctx_len // 4)
+
+    # === Assertions for left_positions ===
+    assert (
+        left_positions >= 0
+    ).all(), f"left_positions has negative values: min={left_positions.min().item()}"
+    assert (left_positions + ctx_len <= ctx_len * 3).all(), (
+        f"left_positions would exceed bounds: "
+        f"max_right={left_positions.max().item() + ctx_len}, limit={ctx_len * 3}"
+    )
 
     # Create index tensors for gathering
     batch_indices = torch.arange(n_windows).unsqueeze(1)
     pos_indices = torch.arange(ctx_len).unsqueeze(0)
     gather_indices = left_positions.unsqueeze(1) + pos_indices
 
+    # === Assertions for gather_indices ===
+    assert gather_indices.shape == (
+        n_windows,
+        ctx_len,
+    ), f"gather_indices shape mismatch: {gather_indices.shape}"
+    assert (
+        gather_indices >= 0
+    ).all(), f"gather_indices has negative values: min={gather_indices.min().item()}"
+    assert (
+        gather_indices < ctx_len * 3
+    ).all(), f"gather_indices out of bounds: max={gather_indices.max().item()}"
+
     # Gather the final windows
     token_windows = all_tokens[batch_indices, gather_indices]
     activation_windows = final_tensor[batch_indices, gather_indices]
+
+    # === Output Assertions ===
+    assert (
+        token_windows.shape[0] == activation_windows.shape[0]
+    ), "token and activation window counts must match"
+    assert token_windows.shape[1] == ctx_len, "token_windows must have ctx_len columns"
+    assert (
+        activation_windows.shape[1] == ctx_len
+    ), "activation_windows must have ctx_len columns"
+    assert not torch.isnan(
+        activation_windows
+    ).any(), "activation_windows contains NaN values"
+
+    return token_windows, activation_windows
+
+
+def pool_centered_activation_windows_new(
+    activations: Float[Tensor, "examples"],
+    tokens: Float[Tensor, "windows seq"],
+    n_windows_per_batch: int,
+    ctx_indices: Float[Tensor, "examples"],
+    index_within_ctx: Float[Tensor, "examples"],
+    ctx_len: int,
+) -> tuple[Float[Tensor, "examples ctx_len"], Float[Tensor, "examples ctx_len"]]:
+    """
+    OPTIMIZED version of pool_centered_activation_windows.
+
+    Key optimizations:
+    1. Uses torch.searchsorted instead of O(n^2) torch.where comparisons
+    2. Builds index mapping tensor once for O(1) lookups
+    3. Avoids creating large intermediate tensors from unsqueeze operations
+
+    Similar to pool_max_activation_windows. Doesn't use the ctx_indices that were
+    at the start of the batch or the end of the batch, because it always tries
+    to have a buffer of ctx_len*5//6 on the left and ctx_len*1//6 on the right.
+    To do this, for each window, it joins the contexts from the other windows
+    of the same batch, to form a new context, which is then cut to the correct shape,
+    centered on the max activation.
+
+    Args:
+        activations : The activations.
+        tokens : The input tokens.
+        ctx_indices : The context indices.
+        index_within_ctx : The index within the context.
+        ctx_len : The context length.
+        max_examples : The maximum number of examples.
+    """
+
+    # === Input Assertions ===
+    assert activations.dim() == 1, f"activations must be 1D, got {activations.dim()}D"
+    assert tokens.dim() == 2, f"tokens must be 2D, got {tokens.dim()}D"
+    assert ctx_indices.dim() == 1, f"ctx_indices must be 1D, got {ctx_indices.dim()}D"
+    assert (
+        index_within_ctx.dim() == 1
+    ), f"index_within_ctx must be 1D, got {index_within_ctx.dim()}D"
+    assert len(activations) == len(ctx_indices), (
+        f"activations and ctx_indices length mismatch: {len(activations)} vs "
+        f"{len(ctx_indices)}"
+    )
+    assert len(activations) == len(index_within_ctx), (
+        f"activations and index_within_ctx length mismatch: {len(activations)} vs "
+        f"{len(index_within_ctx)}"
+    )
+    assert (
+        tokens.shape[1] == ctx_len
+    ), f"tokens seq dim must equal ctx_len: {tokens.shape[1]} vs {ctx_len}"
+    assert n_windows_per_batch > 0, "n_windows_per_batch must be positive"
+    assert ctx_len > 0, "ctx_len must be positive"
+    assert (
+        index_within_ctx.min() >= 0
+    ), f"index_within_ctx has negative values: min={index_within_ctx.min().item()}"
+    assert index_within_ctx.max() < ctx_len, (
+        f"index_within_ctx out of bounds: max={index_within_ctx.max().item()}, "
+        f"ctx_len={ctx_len}"
+    )
+
+    # Get unique context indices and their counts like in pool_max_activation_windows
+    unique_ctx_indices, inverses, lengths = torch.unique_consecutive(
+        ctx_indices, return_counts=True, return_inverse=True
+    )
+
+    # === Assertions after unique_consecutive ===
+    assert len(unique_ctx_indices) == len(
+        lengths
+    ), "unique_ctx_indices and lengths must have same length"
+    assert lengths.sum() == len(activations), (
+        f"lengths sum ({lengths.sum()}) must equal activations count "
+        f"({len(activations)})"
+    )
+    assert inverses.max() < len(
+        unique_ctx_indices
+    ), "inverses must index into unique_ctx_indices"
+
+    # Get the max activation magnitude within each context window
+    max_buffer = torch.segment_reduce(activations, "max", lengths=lengths)
+
+    # === Assertions after segment_reduce ===
+    assert len(max_buffer) == len(unique_ctx_indices), (
+        f"max_buffer length ({len(max_buffer)}) must match unique windows "
+        f"({len(unique_ctx_indices)})"
+    )
+    assert not torch.isnan(
+        max_buffer
+    ).any(), "max_buffer contains NaN values after segment_reduce"
+
+    # Get the top max_examples windows
+    sorted_values, sorted_indices = torch.sort(max_buffer, descending=True)
+
+    # this tensor has the correct activations for each context window
+    temp_tensor = torch.zeros(len(unique_ctx_indices), ctx_len, dtype=activations.dtype)
+    temp_tensor[inverses, index_within_ctx] = activations
+
+    # === Assertions after temp_tensor creation ===
+    assert (
+        temp_tensor.shape[0] == len(unique_ctx_indices)
+        and temp_tensor.shape[1] == ctx_len
+    ), f"temp_tensor shape mismatch: {temp_tensor.shape}"
+
+    unique_ctx_indices = unique_ctx_indices[sorted_indices]
+    temp_tensor = temp_tensor[sorted_indices]
+
+    # if a element in unique_ctx_indices is divisible by n_windows_per_batch it
+    # the start of a new batch, so we discard it
+    modulo = unique_ctx_indices % n_windows_per_batch
+    not_first_position = modulo != 0
+    # remove also the elements that are at the end of the batch
+    not_last_position = modulo != n_windows_per_batch - 1
+    mask = not_first_position & not_last_position
+
+    # === Assertions after mask creation ===
+    assert mask.dtype == torch.bool, f"mask must be boolean, got {mask.dtype}"
+
+    unique_ctx_indices = unique_ctx_indices[mask]
+    temp_tensor = temp_tensor[mask]
+    if len(unique_ctx_indices) == 0:
+        return torch.zeros(0, ctx_len), torch.zeros(0, ctx_len)
+
+    # Vectorized operations for all windows at once
+    n_windows = len(unique_ctx_indices)
+
+    # === Assertions after filtering ===
+    assert n_windows > 0, "n_windows must be positive after filtering"
+    assert (
+        temp_tensor.shape[0] == n_windows
+    ), f"temp_tensor rows ({temp_tensor.shape[0]}) must equal n_windows ({n_windows})"
+
+    # Create indices for previous, current, and next windows
+    prev_indices = unique_ctx_indices - 1
+    next_indices = unique_ctx_indices + 1
+
+    # === Assertions for prev/next indices ===
+    assert (
+        prev_indices >= 0
+    ).all(), f"prev_indices has negative values (min={prev_indices.min().item()})"
+    assert (next_indices < tokens.shape[0]).all(), (
+        f"next_indices out of bounds (max={next_indices.max().item()}, "
+        f"tokens.shape[0]={tokens.shape[0]})"
+    )
+
+    # Create a tensor to hold all concatenated tokens
+    all_tokens = torch.cat(
+        [tokens[prev_indices], tokens[unique_ctx_indices], tokens[next_indices]], dim=1
+    )  # Shape: [n_windows, ctx_len*3]
+
+    # === Assertions after all_tokens creation ===
+    assert all_tokens.shape == (
+        n_windows,
+        ctx_len * 3,
+    ), (
+        f"all_tokens shape mismatch: {all_tokens.shape} vs expected ({n_windows}, "
+        f"{ctx_len * 3})"
+    )
+
+    # Create tensor for all activations
+    final_tensor = torch.zeros((n_windows, ctx_len * 3), dtype=activations.dtype)
+    final_tensor[:, ctx_len : ctx_len * 2] = (
+        temp_tensor  # Set current window activations
+    )
+
+    # === OPTIMIZED SECTION ===
+    # Build a mapping from ctx_index value -> position in unique_ctx_indices
+    # This allows O(1) lookups instead of O(n^2) comparisons
+
+    # Sort unique_ctx_indices to use searchsorted (need to track original positions)
+    sorted_unique, sort_perm = torch.sort(unique_ctx_indices)
+
+    # === Assertions after sorting for searchsorted ===
+    assert len(sorted_unique) == n_windows, "sorted_unique length must match n_windows"
+    assert len(sort_perm) == n_windows, "sort_perm length must match n_windows"
+    assert (
+        sorted_unique[1:] >= sorted_unique[:-1]
+    ).all(), "sorted_unique must be sorted"
+
+    # For prev_indices: find which ones exist in unique_ctx_indices
+    # searchsorted gives us where each prev_index would be inserted
+    prev_insert_pos = torch.searchsorted(sorted_unique, prev_indices)
+    # Clamp to valid range for comparison
+    prev_insert_pos_clamped = prev_insert_pos.clamp(0, len(sorted_unique) - 1)
+    # Check if the value at that position actually matches
+    prev_mask = sorted_unique[prev_insert_pos_clamped] == prev_indices
+
+    if prev_mask.any():
+        # Get the original positions in unique_ctx_indices (before sorting)
+        # sort_perm[prev_insert_pos_clamped[prev_mask]] gives the original indices
+        prev_locations = sort_perm[prev_insert_pos_clamped[prev_mask]]
+        # === Assertions for prev_locations ===
+        assert len(prev_locations) == prev_mask.sum(), (
+            f"prev_locations length ({len(prev_locations)}) must match "
+            f"prev_mask count ({prev_mask.sum().item()})"
+        )
+        assert (
+            prev_locations < n_windows
+        ).all(), f"prev_locations out of bounds: max={prev_locations.max().item()}"
+        final_tensor[prev_mask, :ctx_len] = temp_tensor[prev_locations]
+
+    # For next_indices: same approach
+    next_insert_pos = torch.searchsorted(sorted_unique, next_indices)
+    next_insert_pos_clamped = next_insert_pos.clamp(0, len(sorted_unique) - 1)
+    next_mask = sorted_unique[next_insert_pos_clamped] == next_indices
+
+    if next_mask.any():
+        next_locations = sort_perm[next_insert_pos_clamped[next_mask]]
+        # === Assertions for next_locations ===
+        assert len(next_locations) == next_mask.sum(), (
+            f"next_locations length ({len(next_locations)}) must match "
+            f"next_mask count ({next_mask.sum().item()})"
+        )
+        assert (
+            next_locations < n_windows
+        ).all(), f"next_locations out of bounds: max={next_locations.max().item()}"
+        final_tensor[next_mask, ctx_len * 2 :] = temp_tensor[next_locations]
+
+    # Find max activation indices
+    max_activation_indices = torch.argmax(temp_tensor, dim=1) + ctx_len
+
+    # === Assertions for max_activation_indices ===
+    assert (
+        len(max_activation_indices) == n_windows
+    ), "max_activation_indices length mismatch"
+    assert (
+        max_activation_indices >= ctx_len
+    ).all(), "max_activation_indices must be >= ctx_len"
+    assert (
+        max_activation_indices < ctx_len * 2
+    ).all(), "max_activation_indices must be < ctx_len*2"
+
+    # Calculate left for all windows
+    left_positions = max_activation_indices - (ctx_len - ctx_len // 4)
+
+    # === Assertions for left_positions ===
+    assert (
+        left_positions >= 0
+    ).all(), f"left_positions has negative values: min={left_positions.min().item()}"
+    assert (left_positions + ctx_len <= ctx_len * 3).all(), (
+        f"left_positions would exceed bounds: "
+        f"max_right={left_positions.max().item() + ctx_len}, limit={ctx_len * 3}"
+    )
+
+    # Create index tensors for gathering
+    batch_indices = torch.arange(n_windows, device=activations.device).unsqueeze(1)
+    pos_indices = torch.arange(ctx_len, device=activations.device).unsqueeze(0)
+    gather_indices = left_positions.unsqueeze(1) + pos_indices
+
+    # === Assertions for gather_indices ===
+    assert gather_indices.shape == (
+        n_windows,
+        ctx_len,
+    ), f"gather_indices shape mismatch: {gather_indices.shape}"
+    assert (
+        gather_indices >= 0
+    ).all(), f"gather_indices has negative values: min={gather_indices.min().item()}"
+    assert (
+        gather_indices < ctx_len * 3
+    ).all(), f"gather_indices out of bounds: max={gather_indices.max().item()}"
+
+    # Gather the final windows
+    token_windows = all_tokens[batch_indices, gather_indices]
+    activation_windows = final_tensor[batch_indices, gather_indices]
+
+    # === Output Assertions ===
+    assert (
+        token_windows.shape[0] == activation_windows.shape[0]
+    ), "token and activation window counts must match"
+    assert token_windows.shape[1] == ctx_len, "token_windows must have ctx_len columns"
+    assert (
+        activation_windows.shape[1] == ctx_len
+    ), "activation_windows must have ctx_len columns"
+    assert not torch.isnan(
+        activation_windows
+    ).any(), "activation_windows contains NaN values"
+
     return token_windows, activation_windows
 
 
@@ -442,7 +692,9 @@ def constructor(
     # Add activation examples to the record in place
     pool_start = time.perf_counter()
     if constructor_cfg.center_examples:
-        token_windows, act_windows = pool_centered_activation_windows(
+        # Time and run OLD implementation
+        old_start = time.perf_counter()
+        token_windows_old, act_windows_old = pool_centered_activation_windows_old(
             activations=activations,
             tokens=reshaped_tokens,
             n_windows_per_batch=n_windows_per_batch,
@@ -450,6 +702,79 @@ def constructor(
             index_within_ctx=index_within_ctx,
             ctx_len=example_ctx_len,
         )
+        old_time = time.perf_counter() - old_start
+
+        # Time and run NEW implementation
+        new_start = time.perf_counter()
+        token_windows_new, act_windows_new = pool_centered_activation_windows_new(
+            activations=activations,
+            tokens=reshaped_tokens,
+            n_windows_per_batch=n_windows_per_batch,
+            ctx_indices=ctx_indices,
+            index_within_ctx=index_within_ctx,
+            ctx_len=example_ctx_len,
+        )
+        new_time = time.perf_counter() - new_start
+
+        # === Compare outputs ===
+        shape_match = (
+            token_windows_old.shape == token_windows_new.shape
+            and act_windows_old.shape == act_windows_new.shape
+        )
+
+        if not shape_match:
+            logger.error(
+                f"[POOL CENTERED] Shape mismatch! "
+                f"old_tokens={token_windows_old.shape}, "
+                f"new_tokens={token_windows_new.shape}, "
+                f"old_acts={act_windows_old.shape}, "
+                f"new_acts={act_windows_new.shape}"
+            )
+            raise AssertionError(
+                f"pool_centered_activation_windows old vs new shape mismatch: "
+                f"old_tokens={token_windows_old.shape}, "
+                f"new_tokens={token_windows_new.shape}"
+            )
+        else:
+            # Check if tensors are equal
+            tokens_equal = torch.equal(token_windows_old, token_windows_new)
+            acts_close = torch.allclose(
+                act_windows_old, act_windows_new, rtol=1e-5, atol=1e-8
+            )
+
+            if not tokens_equal:
+                diff_count = (token_windows_old != token_windows_new).sum().item()
+                logger.error(
+                    f"[POOL CENTERED] Token windows differ! "
+                    f"{diff_count} elements different out of "
+                    f"{token_windows_old.numel()}"
+                )
+                raise AssertionError(
+                    f"pool_centered_activation_windows old vs new token mismatch: "
+                    f"{diff_count} elements differ"
+                )
+            if not acts_close:
+                diff = (act_windows_old - act_windows_new).abs()
+                max_diff = diff.max().item()
+                mean_diff = diff.mean().item()
+                logger.error(
+                    f"[POOL CENTERED] Activation windows differ! "
+                    f"max_diff={max_diff:.6f}, mean_diff={mean_diff:.6f}"
+                )
+                raise AssertionError(
+                    f"pool_centered_activation_windows old vs new activation mismatch: "
+                    f"max_diff={max_diff:.6f}"
+                )
+
+            # Log timing comparison (always, since we're always comparing)
+            logger.warning(
+                f"[POOL CENTERED TIMING] old={old_time:.4f}s, new={new_time:.4f}s, "
+                f"speedup={old_time/new_time if new_time > 0 else float('inf'):.2f}x, "
+                f"n_activations={len(activations)}, outputs_match=True"
+            )
+
+        # Use new implementation's output (it's faster and verified to match)
+        token_windows, act_windows = token_windows_new, act_windows_new
     else:
         token_windows, act_windows = pool_max_activation_windows(
             activations=activations,
