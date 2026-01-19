@@ -282,9 +282,17 @@ def pool_centered_activation_windows_old(
     # Set previous window activations where available
     prev_mask = torch.isin(prev_indices, unique_ctx_indices)
     if prev_mask.any():
-        prev_locations = torch.where(
+        # torch.where returns (row_indices, col_indices) where matrix is True
+        # matrix[i,j] = (unique_ctx_indices[i] == prev_indices[j])
+        # We need row indices [0] to index into temp_tensor (source of activations)
+        # The col indices [1] tell us which prev_indices matched
+        # (already captured by prev_mask)
+        row_indices, col_indices = torch.where(
             unique_ctx_indices.unsqueeze(1) == prev_indices.unsqueeze(0)
-        )[1]
+        )
+        # Sort by column index so prev_locations aligns with prev_mask order
+        sort_order = torch.argsort(col_indices)
+        prev_locations = row_indices[sort_order]
         # === Assertions for prev_locations ===
         assert len(prev_locations) == prev_mask.sum(), (
             f"prev_locations length ({len(prev_locations)}) must match "
@@ -298,9 +306,14 @@ def pool_centered_activation_windows_old(
     # Set next window activations where available
     next_mask = torch.isin(next_indices, unique_ctx_indices)
     if next_mask.any():
-        next_locations = torch.where(
+        # Same logic: need row indices [0] to find
+        # where in unique_ctx_indices the match is
+        row_indices, col_indices = torch.where(
             unique_ctx_indices.unsqueeze(1) == next_indices.unsqueeze(0)
-        )[1]
+        )
+        # Sort by column index so next_locations aligns with next_mask order
+        sort_order = torch.argsort(col_indices)
+        next_locations = row_indices[sort_order]
         # === Assertions for next_locations ===
         assert len(next_locations) == next_mask.sum(), (
             f"next_locations length ({len(next_locations)}) must match "
